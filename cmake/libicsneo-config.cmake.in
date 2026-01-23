@@ -1,0 +1,44 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# Find required dependencies
+find_dependency(Threads)
+
+# libusb is required on all platforms (via pkg-config)
+find_dependency(PkgConfig)
+pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
+
+# Platform-specific dependencies
+if(UNIX AND NOT APPLE)
+    # Linux requires libpcap for raw ethernet support
+    pkg_check_modules(PCAP QUIET libpcap)
+endif()
+
+# Include target definitions
+include("${CMAKE_CURRENT_LIST_DIR}/libicsneo-targets.cmake")
+
+# Link system dependencies to imported targets
+if(TARGET libicsneo::icsneocpp)
+    # Thread support
+    set_property(TARGET libicsneo::icsneocpp APPEND PROPERTY
+        INTERFACE_LINK_LIBRARIES Threads::Threads)
+    
+    # libusb
+    set_property(TARGET libicsneo::icsneocpp APPEND PROPERTY
+        INTERFACE_LINK_LIBRARIES PkgConfig::LIBUSB)
+    
+    if(WIN32)
+        # Windows socket libraries
+        set_property(TARGET libicsneo::icsneocpp APPEND PROPERTY
+            INTERFACE_LINK_LIBRARIES ws2_32 iphlpapi)
+    elseif(UNIX)
+        # pcap for raw ethernet
+        if(PCAP_FOUND)
+            set_property(TARGET libicsneo::icsneocpp APPEND PROPERTY
+                INTERFACE_LINK_LIBRARIES ${PCAP_LIBRARIES})
+        endif()
+    endif()
+endif()
+
+check_required_components(libicsneo)

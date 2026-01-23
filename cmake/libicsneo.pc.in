@@ -1,0 +1,11 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: libicsneo
+Description: Intrepid Control Systems neoVI library
+Version: @PROJECT_VERSION@
+Requires: libusb-1.0, protobuf
+Libs: -L${libdir} -licsneocpp
+Cflags: -I${includedir}

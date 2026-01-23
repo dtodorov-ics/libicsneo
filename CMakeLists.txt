@@ -34,6 +34,12 @@ include(GNUInstallDirs)
 
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
+# Detect vcpkg toolchain
+if(DEFINED CMAKE_TOOLCHAIN_FILE AND CMAKE_TOOLCHAIN_FILE MATCHES "vcpkg")
+	set(USE_VCPKG ON)
+	message(STATUS "[libicsneo] vcpkg toolchain detected")
+endif()
+
 # Enable Warnings
 if(MSVC)
 	set(LIBICSNEO_COMPILER_WARNINGS /W4)
@@ -314,7 +320,7 @@ message("Include paths " ${LIBICSNEO_EXTENSION_INCLUDE_PATHS})
 target_include_directories(icsneocpp
 	PUBLIC
 		$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-		$<INSTALL_INTERFACE:>
+		$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 	PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/include
 		${LIBICSNEO_EXTENSION_INCLUDE_PATHS}
@@ -338,10 +344,28 @@ if(LIBICSNEO_ENABLE_CDCACM)
 		find_library(IO_KIT_FRAMEWORK IOKit REQUIRED)
 		target_link_libraries(icsneocpp PRIVATE ${CORE_FOUNDATION_FRAMEWORK} ${IO_KIT_FRAMEWORK})
 	endif()
+	# libusb for CDCACM support (all platforms including Windows)
+	if(USE_VCPKG OR WIN32)
+		find_package(PkgConfig REQUIRED)
+		pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
+		target_link_libraries(icsneocpp PRIVATE $<BUILD_INTERFACE:PkgConfig::LIBUSB>)
+		message(STATUS "[libicsneo] Using libusb via pkg-config")
+	else()
+		# Fallback: system paths for Linux/macOS
+		find_package(PkgConfig QUIET)
+		if(PKG_CONFIG_FOUND)
+			pkg_check_modules(LIBUSB libusb-1.0)
+			if(LIBUSB_FOUND)
+				target_include_directories(icsneocpp PRIVATE ${LIBUSB_INCLUDE_DIRS})
+				target_link_libraries(icsneocpp PRIVATE ${LIBUSB_LIBRARIES})
+				message(STATUS "[libicsneo] Using system libusb via pkg-config")
+			endif()
+		endif()
+	endif()
 endif()
 if(LIBICSNEO_ENABLE_DXX)
 	target_compile_definitions(icsneocpp PRIVATE ICSNEO_ENABLE_DXX)
-	target_link_libraries(icsneocpp PRIVATE libredxx::libredxx)
+	target_link_libraries(icsneocpp PRIVATE $<BUILD_INTERFACE:libredxx::libredxx>)
 endif()
 if(LIBICSNEO_ENABLE_TCP)
 	target_compile_definitions(icsneocpp PRIVATE ICSNEO_ENABLE_TCP)
@@ -353,7 +377,7 @@ endif()
 # fatfs
 add_subdirectory(third-party/fatfs)
 set_property(TARGET fatfs PROPERTY POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(icsneocpp PRIVATE fatfs)
+target_link_libraries(icsneocpp PRIVATE $<BUILD_INTERFACE:fatfs>)
 
 # dxx
 if(LIBICSNEO_ENABLE_DXX)
@@ -362,7 +386,8 @@ if(LIBICSNEO_ENABLE_DXX)
 		GIT_REPOSITORY https://github.com/Zeranoe/libredxx.git
 		GIT_TAG 267abf26a99fa69ed80a4180b155245a36fad101
 	)
-	set(LIBREDXX_DISABLE_INSTALL ON)
+	# Don't disable install - vcpkg needs libredxx to be installed
+	# set(LIBREDXX_DISABLE_INSTALL ON)
 	FetchContent_MakeAvailable(libredxx)
 endif()
 
@@ -370,7 +395,7 @@ endif()
 if(LIBICSNEO_ENABLE_RAW_ETHERNET)
 	if(WIN32)
 		if(LIBICSNEO_NPCAP_INCLUDE_DIR STREQUAL "")
-			target_include_directories(icsneocpp PUBLIC AFTER third-party/winpcap/include)
+			target_include_directories(icsneocpp PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third-party/winpcap/include>)
 			add_definitions(-DWPCAP -DHAVE_REMOTE)
 		else()
 			target_include_directories(icsneocpp PUBLIC AFTER ${LIBICSNEO_NPCAP_INCLUDE_DIR})
@@ -383,6 +408,13 @@ if(LIBICSNEO_ENABLE_RAW_ETHERNET)
 endif(LIBICSNEO_ENABLE_RAW_ETHERNET)
 
 # protobuf
+if(USE_VCPKG)
+	# When using vcpkg, set protobuf_ROOT to use vcpkg's protobuf and skip icspb's bootstrap
+	if(NOT DEFINED protobuf_ROOT)
+		set(protobuf_ROOT "${CMAKE_CURRENT_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}")
+		message(STATUS "[libicsneo] Setting protobuf_ROOT for icspb: ${protobuf_ROOT}")
+	endif()
+endif()
 if(DEFINED ENV{LIBICSNEO_ICSPB_REPO})
 	set(LIBICSNEO_ICSPB_REPO "$ENV{LIBICSNEO_ICSPB_REPO}")
 endif()
@@ -394,15 +426,44 @@ FetchContent_Declare(icspb
 	GIT_REPOSITORY ${LIBICSNEO_ICSPB_REPO}
 	GIT_TAG 3339fa6b83a6b3e7704d41f5c2f2175cfc761a1f
 )
-FetchContent_MakeAvailable(icspb)
-target_link_libraries(icsneocpp PRIVATE icspb::icspb)
+
+# Populate icspb source before processing to apply fix
+# We must use FetchContent_Populate() directly instead of FetchContent_MakeAvailable()
+# because we need to modify icspb's CMakeLists.txt BEFORE add_subdirectory() is called.
+# This allows us to inject the protobuf directory creation fix before the build rules are generated.
+# Suppress CMP0169 deprecation warning since we have a legitimate reason for this approach.
+if(POLICY CMP0169)
+	set(CMAKE_POLICY_DEFAULT_CMP0169 OLD)
+endif()
+
+FetchContent_GetProperties(icspb)
+if(NOT icspb_POPULATED)
+	FetchContent_Populate(icspb)
+	
+	# Apply fix for protobuf directory creation
+	file(READ "${icspb_SOURCE_DIR}/CMakeLists.txt" ICSPB_CMAKE_CONTENT)
+	string(FIND "${ICSPB_CMAKE_CONTENT}" "# Create output directories for generated protobuf files" FIX_APPLIED)
+	if(FIX_APPLIED EQUAL -1)
+		message(STATUS "[libicsneo] Applying protobuf directory fix to icspb")
+		string(REPLACE 
+			"target_include_directories(icspb PUBLIC \${PROTO_OUT_DIR})\n\nprotobuf_generate("
+			"target_include_directories(icspb PUBLIC \${PROTO_OUT_DIR})\n\n# Create output directories for generated protobuf files\n# Fix: protoc doesn't create parent directories, only the files\nfile(MAKE_DIRECTORY \"\${PROTO_OUT_DIR}/commands/generic/v1\")\nfile(MAKE_DIRECTORY \"\${PROTO_OUT_DIR}/commands/network/v1\")\nfile(MAKE_DIRECTORY \"\${PROTO_OUT_DIR}/common/v1\")\nfile(MAKE_DIRECTORY \"\${PROTO_OUT_DIR}/settings/common/v1\")\nfile(MAKE_DIRECTORY \"\${PROTO_OUT_DIR}/settings/manufacturing/v1\")\n\nprotobuf_generate("
+			ICSPB_CMAKE_CONTENT "${ICSPB_CMAKE_CONTENT}")
+		file(WRITE "${icspb_SOURCE_DIR}/CMakeLists.txt" "${ICSPB_CMAKE_CONTENT}")
+	endif()
+	
+	# Now add the subdirectory
+	add_subdirectory(${icspb_SOURCE_DIR} ${icspb_BINARY_DIR})
+endif()
+
+target_link_libraries(icsneocpp PRIVATE $<BUILD_INTERFACE:icspb::icspb>)
 
 if(LIBICSNEO_BUILD_ICSNEOC)
 	add_library(icsneoc SHARED api/icsneoc/icsneoc.cpp ${CMAKE_CURRENT_BINARY_DIR}/generated/icsneoc/version.rc)
 	target_include_directories(icsneoc
 		PUBLIC
 			$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-			$<INSTALL_INTERFACE:>
+			$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 		PRIVATE
 			${CMAKE_CURRENT_SOURCE_DIR}/include
 	)
@@ -416,7 +477,7 @@ if(LIBICSNEO_BUILD_ICSNEOC_STATIC)
 	target_include_directories(icsneoc-static
 		PUBLIC
 			$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-			$<INSTALL_INTERFACE:>
+			$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 		PRIVATE
 			${CMAKE_CURRENT_SOURCE_DIR}/include
 	)
@@ -436,7 +497,7 @@ if(LIBICSNEO_BUILD_ICSNEOLEGACY)
 	target_include_directories(icsneolegacy
 		PUBLIC
 			$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-			$<INSTALL_INTERFACE:>
+			$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 		PRIVATE
 			${CMAKE_CURRENT_SOURCE_DIR}/include
 	)
@@ -455,7 +516,7 @@ if(LIBICSNEO_BUILD_ICSNEOLEGACY_STATIC)
 	target_include_directories(icsneolegacy-static
 		PUBLIC
 			$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-			$<INSTALL_INTERFACE:>
+			$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 		PRIVATE
 			${CMAKE_CURRENT_SOURCE_DIR}/include
 	)
@@ -505,6 +566,110 @@ if(LIBICSNEO_BUILD_UNIT_TESTS)
 	add_test(NAME libicsneo-unit-test-suite COMMAND libicsneo-unit-tests)
 endif()
 
+
+# ============================================================================
+# vcpkg Installation Support
+# ============================================================================
+
+include(CMakePackageConfigHelpers)
+
+# Install targets
+set(LIBICSNEO_INSTALL_TARGETS)
+
+# Always install icsneocpp (core library)
+list(APPEND LIBICSNEO_INSTALL_TARGETS icsneocpp)
+
+# Conditionally install C API libraries
+if(LIBICSNEO_BUILD_ICSNEOC)
+    list(APPEND LIBICSNEO_INSTALL_TARGETS icsneoc)
+endif()
+
+if(LIBICSNEO_BUILD_ICSNEOC_STATIC)
+    list(APPEND LIBICSNEO_INSTALL_TARGETS icsneoc-static)
+endif()
+
+# Conditionally install legacy API libraries
+if(LIBICSNEO_BUILD_ICSNEOLEGACY)
+    list(APPEND LIBICSNEO_INSTALL_TARGETS icsneolegacy)
+endif()
+
+if(LIBICSNEO_BUILD_ICSNEOLEGACY_STATIC)
+    list(APPEND LIBICSNEO_INSTALL_TARGETS icsneolegacy-static)
+endif()
+
+# Install bundled/FetchContent dependencies for package managers
+# These are normally BUILD_INTERFACE only, but vcpkg needs them installed
+list(APPEND LIBICSNEO_INSTALL_TARGETS fatfs)
+if(LIBICSNEO_ENABLE_DXX AND TARGET libredxx)
+    list(APPEND LIBICSNEO_INSTALL_TARGETS libredxx)
+endif()
+
+# Install all configured targets
+install(TARGETS ${LIBICSNEO_INSTALL_TARGETS}
+    EXPORT libicsneo-targets
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+# Install public headers
+install(DIRECTORY include/icsneo
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING PATTERN "*.h"
+    PATTERN "*.template" EXCLUDE
+)
+
+# Install generated headers
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/buildinfo.h"
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/icsneo
+)
+
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/extensions/builtin.h"
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/icsneo/device/extensions
+)
+
+# Export targets
+install(EXPORT libicsneo-targets
+    FILE libicsneo-targets.cmake
+    NAMESPACE libicsneo::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/libicsneo
+)
+
+# Generate config file
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/libicsneo-config.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/libicsneo-config.cmake"
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/libicsneo
+)
+
+# Generate version file
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/libicsneo-config-version.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+# Install config files
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/libicsneo-config.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/libicsneo-config-version.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/libicsneo
+)
+
+# Install pkg-config file (optional but recommended)
+if(UNIX)
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/libicsneo.pc.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/libicsneo.pc"
+        @ONLY
+    )
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/libicsneo.pc"
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
+    )
+endif()
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})
 set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})
 include(CPack)

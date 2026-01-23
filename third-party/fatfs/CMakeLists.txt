@@ -5,4 +5,8 @@ add_library(fatfs
 	source/ffunicode.c
 	source/ffsystem.c
 )
-target_include_directories(fatfs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/source)
+target_include_directories(fatfs 
+	PUBLIC 
+		$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/source>
+		$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/fatfs>
+)

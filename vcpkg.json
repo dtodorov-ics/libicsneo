@@ -1,0 +1,12 @@
+{
+  "name": "libicsneo",
+  "version": "1.0.0",
+  "description": "Intrepid Control Systems cross-platform neoVI library",
+  "homepage": "https://github.com/intrepidcs/libicsneo",
+  "license": "MIT",
+  "dependencies": [
+    "pkgconf",
+    "libusb",
+    "protobuf"
+  ]
+}
