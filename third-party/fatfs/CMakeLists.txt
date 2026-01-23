@@ -10,3 +10,11 @@ target_include_directories(fatfs
 		$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/source>
 		$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/fatfs>
 )
+
+# Install fatfs headers for vcpkg
+install(FILES
+    source/ff.h
+    source/ffconf.h
+    source/diskio.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/fatfs
+)

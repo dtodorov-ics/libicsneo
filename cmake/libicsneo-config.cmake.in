@@ -9,18 +9,22 @@ find_dependency(Threads)
 find_dependency(PkgConfig)
 pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
 
+# Protobuf is required (for icspb)
+find_dependency(protobuf CONFIG)
+
 # Platform-specific dependencies
 if(UNIX AND NOT APPLE)
     # Linux requires libpcap for raw ethernet support
-    pkg_check_modules(PCAP QUIET libpcap)
+    pkg_check_modules(PCAP REQUIRED libpcap)
 endif()
 
 # Include target definitions
 include("${CMAKE_CURRENT_LIST_DIR}/libicsneo-targets.cmake")
 
-# Link system dependencies to imported targets
+# Attach transitive dependencies to the exported targets
+# These are BUILD_INTERFACE only in the original build, so we must re-attach them
 if(TARGET libicsneo::icsneocpp)
-    # Thread support
+    # Thread support (already PUBLIC in original, but ensure it's there)
     set_property(TARGET libicsneo::icsneocpp APPEND PROPERTY
         INTERFACE_LINK_LIBRARIES Threads::Threads)
     
@@ -28,15 +32,30 @@ if(TARGET libicsneo::icsneocpp)
     set_property(TARGET libicsneo::icsneocpp APPEND PROPERTY
         INTERFACE_LINK_LIBRARIES PkgConfig::LIBUSB)
     
+    # protobuf
+    set_property(TARGET libicsneo::icsneocpp APPEND PROPERTY
+        INTERFACE_LINK_LIBRARIES protobuf::libprotobuf)
+    
+    # Internal dependencies (fatfs, libredxx)
+    if(TARGET libicsneo::fatfs)
+        set_property(TARGET libicsneo::icsneocpp APPEND PROPERTY
+            INTERFACE_LINK_LIBRARIES libicsneo::fatfs)
+    endif()
+    if(TARGET libicsneo::libredxx)
+        set_property(TARGET libicsneo::icsneocpp APPEND PROPERTY
+            INTERFACE_LINK_LIBRARIES libicsneo::libredxx)
+    endif()
+    
+    # Platform-specific
     if(WIN32)
-        # Windows socket libraries
         set_property(TARGET libicsneo::icsneocpp APPEND PROPERTY
             INTERFACE_LINK_LIBRARIES ws2_32 iphlpapi)
     elseif(UNIX)
-        # pcap for raw ethernet
         if(PCAP_FOUND)
             set_property(TARGET libicsneo::icsneocpp APPEND PROPERTY
                 INTERFACE_LINK_LIBRARIES ${PCAP_LIBRARIES})
+            set_property(TARGET libicsneo::icsneocpp APPEND PROPERTY
+                INTERFACE_INCLUDE_DIRECTORIES ${PCAP_INCLUDE_DIRS})
         endif()
     endif()
 endif()
