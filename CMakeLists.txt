@@ -28,7 +28,6 @@ option(LIBICSNEO_ENABLE_DXX "Enable devices which communicate over D2XX/D3XX via
 option(LIBICSNEO_ENABLE_BINDINGS_PYTHON "Enable Python library" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 
 include(GNUInstallDirs)
 
@@ -38,6 +37,11 @@ set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 if(DEFINED CMAKE_TOOLCHAIN_FILE AND CMAKE_TOOLCHAIN_FILE MATCHES "vcpkg")
 	set(USE_VCPKG ON)
 	message(STATUS "[libicsneo] vcpkg toolchain detected")
+endif()
+
+# Set MSVC runtime library only when not using vcpkg (vcpkg controls this via triplet)
+if(MSVC AND NOT USE_VCPKG)
+	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
 # Enable Warnings
