@@ -349,22 +349,130 @@ if(LIBICSNEO_ENABLE_CDCACM)
 		target_link_libraries(icsneocpp PRIVATE ${CORE_FOUNDATION_FRAMEWORK} ${IO_KIT_FRAMEWORK})
 	endif()
 	# libusb for CDCACM support (all platforms including Windows)
-	if(USE_VCPKG OR WIN32)
-		find_package(PkgConfig REQUIRED)
-		pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
-		target_link_libraries(icsneocpp PRIVATE $<BUILD_INTERFACE:PkgConfig::LIBUSB>)
-		message(STATUS "[libicsneo] Using libusb via pkg-config")
-	else()
-		# Fallback: system paths for Linux/macOS
-		find_package(PkgConfig QUIET)
-		if(PKG_CONFIG_FOUND)
-			pkg_check_modules(LIBUSB libusb-1.0)
-			if(LIBUSB_FOUND)
-				target_include_directories(icsneocpp PRIVATE ${LIBUSB_INCLUDE_DIRS})
-				target_link_libraries(icsneocpp PRIVATE ${LIBUSB_LIBRARIES})
-				message(STATUS "[libicsneo] Using system libusb via pkg-config")
+	set(LIBUSB_FOUND FALSE)
+	
+	# Try pkg-config first (works with vcpkg or system pkg-config)
+	find_package(PkgConfig QUIET)
+	if(PKG_CONFIG_FOUND)
+		pkg_check_modules(LIBUSB IMPORTED_TARGET libusb-1.0)
+		if(LIBUSB_FOUND)
+			target_link_libraries(icsneocpp PRIVATE $<BUILD_INTERFACE:PkgConfig::LIBUSB>)
+			message(STATUS "[libicsneo] Using libusb via pkg-config")
+		endif()
+	endif()
+	
+	# Fallback: Try find_package for libusb (CMake config mode)
+	if(NOT LIBUSB_FOUND)
+		find_package(libusb CONFIG QUIET)
+		if(libusb_FOUND)
+			target_link_libraries(icsneocpp PRIVATE libusb::libusb)
+			set(LIBUSB_FOUND TRUE)
+			message(STATUS "[libicsneo] Using libusb via CMake find_package")
+		endif()
+	endif()
+	
+	# Fallback for Windows: manual path specification via LIBUSB_ROOT
+	if(NOT LIBUSB_FOUND AND WIN32)
+		if(DEFINED LIBUSB_ROOT OR DEFINED ENV{LIBUSB_ROOT})
+			if(DEFINED ENV{LIBUSB_ROOT} AND NOT DEFINED LIBUSB_ROOT)
+				set(LIBUSB_ROOT "$ENV{LIBUSB_ROOT}")
+			endif()
+			message(STATUS "[libicsneo] Looking for libusb in LIBUSB_ROOT: ${LIBUSB_ROOT}")
+			find_path(LIBUSB_INCLUDE_DIR libusb.h
+				PATHS "${LIBUSB_ROOT}/include" "${LIBUSB_ROOT}/include/libusb-1.0"
+				NO_DEFAULT_PATH)
+			find_library(LIBUSB_LIBRARY
+				NAMES libusb-1.0 usb-1.0 libusb
+				PATHS "${LIBUSB_ROOT}/lib" 
+					"${LIBUSB_ROOT}/VS2022/MS64/static" "${LIBUSB_ROOT}/VS2022/MS64/dll"
+					"${LIBUSB_ROOT}/VS2019/MS64/static" "${LIBUSB_ROOT}/VS2019/MS64/dll"
+				NO_DEFAULT_PATH)
+			if(LIBUSB_INCLUDE_DIR AND LIBUSB_LIBRARY)
+				target_include_directories(icsneocpp PRIVATE ${LIBUSB_INCLUDE_DIR})
+				target_link_libraries(icsneocpp PRIVATE ${LIBUSB_LIBRARY})
+				set(LIBUSB_FOUND TRUE)
+				message(STATUS "[libicsneo] Using libusb from LIBUSB_ROOT: ${LIBUSB_ROOT}")
+				message(STATUS "[libicsneo]   Include: ${LIBUSB_INCLUDE_DIR}")
+				message(STATUS "[libicsneo]   Library: ${LIBUSB_LIBRARY}")
 			endif()
 		endif()
+	endif()
+	
+	# Fallback for Linux/macOS: system paths
+	if(NOT LIBUSB_FOUND AND NOT WIN32)
+		find_path(LIBUSB_INCLUDE_DIR libusb.h PATH_SUFFIXES libusb-1.0)
+		find_library(LIBUSB_LIBRARY NAMES usb-1.0 libusb-1.0)
+		if(LIBUSB_INCLUDE_DIR AND LIBUSB_LIBRARY)
+			target_include_directories(icsneocpp PRIVATE ${LIBUSB_INCLUDE_DIR})
+			target_link_libraries(icsneocpp PRIVATE ${LIBUSB_LIBRARY})
+			set(LIBUSB_FOUND TRUE)
+			message(STATUS "[libicsneo] Using system libusb")
+		endif()
+	endif()
+	
+	# Final fallback: Download pre-built libusb binaries via FetchContent
+	if(NOT LIBUSB_FOUND)
+		message(STATUS "[libicsneo] libusb not found - downloading pre-built binaries via FetchContent")
+		include(FetchContent)
+		
+		set(LIBUSB_VERSION "1.0.27")
+		
+		if(WIN32)
+			# Download pre-built Windows binaries (much simpler than building from source)
+			set(LIBUSB_URL "https://github.com/libusb/libusb/releases/download/v${LIBUSB_VERSION}/libusb-${LIBUSB_VERSION}.7z")
+			set(LIBUSB_HASH "SHA256=19835e290f46fab6bd8ce4be6ab7dc5209f1c04bad177065df485e51dc4118c8")
+			
+			FetchContent_Declare(libusb_bin
+				URL ${LIBUSB_URL}
+				URL_HASH ${LIBUSB_HASH}
+				DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+			)
+			FetchContent_MakeAvailable(libusb_bin)
+			
+			set(LIBUSB_ROOT "${libusb_bin_SOURCE_DIR}")
+			set(LIBUSB_INCLUDE_DIR "${LIBUSB_ROOT}/include/libusb-1.0")
+			
+			# Determine architecture for library path
+			if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+				set(LIBUSB_ARCH "x64")
+			else()
+				set(LIBUSB_ARCH "Win32")
+			endif()
+			
+			# Check for VS2019+ static lib first, then VS2015
+			if(EXISTS "${LIBUSB_ROOT}/VS2019/MS64/static/libusb-1.0.lib")
+				set(LIBUSB_LIB_DIR "${LIBUSB_ROOT}/VS2019/MS64/static")
+			elseif(EXISTS "${LIBUSB_ROOT}/VS2015-${LIBUSB_ARCH}/static/libusb-1.0.lib")
+				set(LIBUSB_LIB_DIR "${LIBUSB_ROOT}/VS2015-${LIBUSB_ARCH}/static")
+			else()
+				# Generic path fallback
+				set(LIBUSB_LIB_DIR "${LIBUSB_ROOT}/VS2019/MS64/static")
+			endif()
+			
+			find_library(LIBUSB_LIBRARY NAMES libusb-1.0 PATHS "${LIBUSB_LIB_DIR}" NO_DEFAULT_PATH)
+			
+			if(LIBUSB_LIBRARY)
+				target_include_directories(icsneocpp PRIVATE ${LIBUSB_INCLUDE_DIR})
+				target_link_libraries(icsneocpp PRIVATE ${LIBUSB_LIBRARY})
+				set(LIBUSB_FOUND TRUE)
+				message(STATUS "[libicsneo] Using downloaded pre-built libusb (v${LIBUSB_VERSION})")
+			else()
+				message(WARNING "[libicsneo] Downloaded libusb but could not find library at ${LIBUSB_LIB_DIR}")
+			endif()
+		else()
+			# For non-Windows, download source and try to build (simpler on Unix)
+			# Or require system installation
+			message(FATAL_ERROR "[libicsneo] CDCACM is enabled but libusb-1.0 could not be found.\n"
+				"Please install libusb-1.0 development package:\n"
+				"  Ubuntu/Debian: sudo apt-get install libusb-1.0-0-dev\n"
+				"  Fedora: sudo dnf install libusb1-devel\n"
+				"  macOS: brew install libusb")
+		endif()
+	endif()
+	
+	if(NOT LIBUSB_FOUND)
+		message(FATAL_ERROR "[libicsneo] CDCACM is enabled but libusb-1.0 could not be found or built.\n"
+			"This should not happen - please report this issue.")
 	endif()
 endif()
 if(LIBICSNEO_ENABLE_DXX)
@@ -411,12 +519,34 @@ if(LIBICSNEO_ENABLE_RAW_ETHERNET)
 	endif(WIN32)
 endif(LIBICSNEO_ENABLE_RAW_ETHERNET)
 
-# protobuf
+# protobuf / icspb configuration
+# icspb requires protobuf. If protobuf_ROOT is set, icspb will use it.
+# Otherwise, icspb will try to bootstrap protobuf.
+# The bootstrap can fail on some systems (especially Windows with long paths).
+# We try to find system protobuf first to avoid the bootstrap.
 if(USE_VCPKG)
 	# When using vcpkg, set protobuf_ROOT to use vcpkg's protobuf and skip icspb's bootstrap
 	if(NOT DEFINED protobuf_ROOT)
 		set(protobuf_ROOT "${CMAKE_CURRENT_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}")
 		message(STATUS "[libicsneo] Setting protobuf_ROOT for icspb: ${protobuf_ROOT}")
+	endif()
+elseif(NOT DEFINED protobuf_ROOT)
+	# Not using vcpkg and protobuf_ROOT not set - try to find system protobuf
+	find_package(protobuf CONFIG QUIET)
+	if(protobuf_FOUND)
+		message(STATUS "[libicsneo] Found system protobuf: ${protobuf_CONFIG}")
+		# Extract install root from config path by walking up 3 directory levels
+		get_filename_component(protobuf_ROOT "${protobuf_CONFIG}" DIRECTORY)
+		get_filename_component(protobuf_ROOT "${protobuf_ROOT}" DIRECTORY)
+		get_filename_component(protobuf_ROOT "${protobuf_ROOT}" DIRECTORY)
+		message(STATUS "[libicsneo] Setting protobuf_ROOT for icspb: ${protobuf_ROOT}")
+	else()
+		# System protobuf not found - icspb will attempt to bootstrap it
+		message(STATUS "[libicsneo] System protobuf not found - icspb will bootstrap protobuf")
+		message(STATUS "[libicsneo] To use pre-installed protobuf, set -Dprotobuf_ROOT=<path>")
+		if(WIN32)
+			message(STATUS "[libicsneo] On Windows, consider using vcpkg: cmake -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake")
+		endif()
 	endif()
 endif()
 if(DEFINED ENV{LIBICSNEO_ICSPB_REPO})
@@ -425,40 +555,26 @@ endif()
 if(NOT LIBICSNEO_ICSPB_REPO)
 	set(LIBICSNEO_ICSPB_REPO https://github.com/intrepidcs/icspb.git)
 endif()
+if(DEFINED ENV{LIBICSNEO_ICSPB_TAG})
+	set(LIBICSNEO_ICSPB_TAG "$ENV{LIBICSNEO_ICSPB_TAG}")
+endif()
+if(NOT LIBICSNEO_ICSPB_TAG)
+	set(LIBICSNEO_ICSPB_TAG 3339fa6b83a6b3e7704d41f5c2f2175cfc761a1f)
+endif()
 include(FetchContent)
 FetchContent_Declare(icspb
 	GIT_REPOSITORY ${LIBICSNEO_ICSPB_REPO}
-	GIT_TAG 3339fa6b83a6b3e7704d41f5c2f2175cfc761a1f
+	GIT_TAG ${LIBICSNEO_ICSPB_TAG}
 )
 
-# Populate icspb source before processing to apply fix
-# We must use FetchContent_Populate() directly instead of FetchContent_MakeAvailable()
-# because we need to modify icspb's CMakeLists.txt BEFORE add_subdirectory() is called.
-# This allows us to inject the protobuf directory creation fix before the build rules are generated.
-# Suppress CMP0169 deprecation warning since we have a legitimate reason for this approach.
-if(POLICY CMP0169)
-	set(CMAKE_POLICY_DEFAULT_CMP0169 OLD)
+# On Windows, use a shorter bootstrap path to avoid path length issues
+# The default path can exceed MAX_PATH (260 chars) causing absl build failures
+if(WIN32 AND NOT DEFINED ICSPB_BOOTSTRAP_DIR)
+	set(ICSPB_BOOTSTRAP_DIR "${CMAKE_SOURCE_DIR}/_pb_boot" CACHE PATH "icspb protobuf bootstrap directory")
+	message(STATUS "[libicsneo] Setting ICSPB_BOOTSTRAP_DIR to short path: ${ICSPB_BOOTSTRAP_DIR}")
 endif()
 
-FetchContent_GetProperties(icspb)
-if(NOT icspb_POPULATED)
-	FetchContent_Populate(icspb)
-	
-	# Apply fix for protobuf directory creation
-	file(READ "${icspb_SOURCE_DIR}/CMakeLists.txt" ICSPB_CMAKE_CONTENT)
-	string(FIND "${ICSPB_CMAKE_CONTENT}" "# Create output directories for generated protobuf files" FIX_APPLIED)
-	if(FIX_APPLIED EQUAL -1)
-		message(STATUS "[libicsneo] Applying protobuf directory fix to icspb")
-		string(REPLACE 
-			"target_include_directories(icspb PUBLIC \${PROTO_OUT_DIR})\n\nprotobuf_generate("
-			"target_include_directories(icspb PUBLIC \${PROTO_OUT_DIR})\n\n# Create output directories for generated protobuf files\n# Fix: protoc doesn't create parent directories, only the files\nfile(MAKE_DIRECTORY \"\${PROTO_OUT_DIR}/commands/generic/v1\")\nfile(MAKE_DIRECTORY \"\${PROTO_OUT_DIR}/commands/network/v1\")\nfile(MAKE_DIRECTORY \"\${PROTO_OUT_DIR}/common/v1\")\nfile(MAKE_DIRECTORY \"\${PROTO_OUT_DIR}/settings/common/v1\")\nfile(MAKE_DIRECTORY \"\${PROTO_OUT_DIR}/settings/manufacturing/v1\")\n\nprotobuf_generate("
-			ICSPB_CMAKE_CONTENT "${ICSPB_CMAKE_CONTENT}")
-		file(WRITE "${icspb_SOURCE_DIR}/CMakeLists.txt" "${ICSPB_CMAKE_CONTENT}")
-	endif()
-	
-	# Now add the subdirectory
-	add_subdirectory(${icspb_SOURCE_DIR} ${icspb_BINARY_DIR})
-endif()
+FetchContent_MakeAvailable(icspb)
 
 target_link_libraries(icsneocpp PRIVATE $<BUILD_INTERFACE:icspb::icspb>)
 
