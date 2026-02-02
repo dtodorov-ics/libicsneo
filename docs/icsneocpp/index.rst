@@ -5,6 +5,7 @@ icsneocpp
    :maxdepth: 2
 
    installation
+   vcpkginstallation
    deviceconcepts
    apiconcepts
    examples
